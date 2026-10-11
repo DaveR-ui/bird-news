@@ -40,10 +40,71 @@ Canonical app commands (all run from `apps/weather-radar/`):
 
 Node requirement: **≥ 22.18** (the ng-native documented floor; its own dev
 environment uses Node 24). Toolchain present on the authoring host: Node
-v26.11.1, OpenJDK 27. That host has **no Android SDK / emulator / adb**, so
-on-device boot is evidenced by the produced Android Hermes bundle +
-typecheck + unit tests, **not** by running an emulator (deferred to a
-machine with the Android toolchain via `npm run android` / EAS).
+v26.11.1, OpenJDK 27.
+
+### Android toolchain on this host (Option A, user-local, no sudo)
+
+As of **2026-10-10** the host **does** carry a full Android toolchain,
+installed **without sudo** under `$HOME` (nothing outside the home
+directory, nothing committed to this repo):
+
+- **cmdline-tools** — Google's official
+  `commandlinetools-linux-16111833_latest.zip` (rev 23.0), unzipped to
+  `~/Android/Sdk/cmdline-tools/latest`. Filename + SHA-1
+  (`e025545c62a8e64c7559119566a569fb1dec5f60`, 181 052 239 B) verified
+  against Google's `repository2-3.xml` manifest before download.
+- **SDK packages** (installed via `sdkmanager --install`, licenses accepted
+  non-interactively — the new cmdline-tools CLI no longer prompts for
+  `--licenses`): `platform-tools` 37.0.1, `platforms/android-36` (API 36,
+  ext. 17), `build-tools/36.0.0`, `emulator` 37.2.12, and
+  `system-images/android-36/google_apis/x86_64` r07. Total ~5.6 GB.
+- **AVD** — `pixel`, device profile `pixel_7`, target
+  `system-images;android-36;google_apis;x86_64`.
+- **Acceleration** — `/dev/kvm` present and world-writable on this host
+  (`crw-rw-rw- root kvm 10,232`); the user is not in the `kvm` group but
+  the device node is group/world-writable, so KVM is usable without
+  `usermod -aG kvm`. Software GL via SwiftShader (no host GPU passthrough).
+- **Env** — `ANDROID_HOME` / `ANDROID_SDK_ROOT` +
+  `cmdline-tools/latest/bin`, `platform-tools`, `emulator` on `PATH` are
+  exported from `~/.bashrc` (inserted **above** the non-interactive guard,
+  so they apply to non-interactive shells too).
+
+**Verified end-to-end on 2026-10-10** (cold boot, `-no-window
+-no-audio -no-snapshot -accel on -gpu swiftshader_indirect`):
+
+```
+$ emulator -list-avds
+pixel
+$ adb devices
+emulator-5554   device            # Android 16 / API 36
+# Boot completed in 32162 ms
+$ cd apps/weather-radar && npm run android      # expo start --android
+Metro bundler started; Android Bundled 8890ms src/main.ts (1261 modules)
+Expo Go (host.exp.exponent) installed on the emulator automatically
+# In-app UI, read back via `adb shell uiautomator dump`:
+  "Weather Radar (read-only)" / "Public GET only · no data sent · personal/educational use"
+  "Load live radar config"  ->  "source: radar.wo-cloud.com/config/config.json (HTTP 200, live GET)"
+  layers turned ON: Lightning, Lightning realtime overlay, Webcams, Precipitation, Temperature, Gust
+  "Radar map — MOCK (not live) / FICTIONAL"  (unchanged, as designed)
+```
+
+So on-device boot is now **directly evidenced** by an emulator run, in
+addition to the Android Hermes bundle, typecheck and unit tests. Expo Go
+does host the ng-native custom native modules, so `expo run:android`
+(a local Gradle dev build) is **not** required — note that it would also
+have been blocked by OpenJDK 27, which is ahead of the AGP supported
+range and cannot be changed without sudo.
+
+Notes:
+
+- The new `sdkmanager` (cmdline-tools ≥ 23) is a thin wrapper over the
+  new `android` CLI: it prints a deprecation warning, still **accepts the
+  classic semicolon package paths** (`platforms;android-36`,
+  `build-tools;36.0.0`, `system-images;android-36;google_apis;x86_64`) and
+  still writes the classic on-disk layout.
+- `/usr/bin/adb` (android-tools, 37.0.0) remains installed system-wide;
+  the SDK's `platform-tools` (37.0.1) wins on `PATH` once
+  `~/.bashrc` is sourced.
 
 ### Read-only network contract (app)
 The app is **read-only by construction**: HTTP **GET** only; no request
@@ -71,6 +132,9 @@ Full inventory, each justified: `apps/weather-radar/ENDPOINTS.md`.
   from that audit's §8 endpoint inventory. Framework verified as
   **ng-native 0.9.0** (alpha, actively developed; Angular 22 / Expo 57 /
   React Native 0.86 / Node ≥22.18 confirmed against the live repo).
+- 2026-10-10: **Android toolchain installed locally (no sudo)** and the
+  app **booted on an emulator** — see "Android toolchain on this host"
+  above. Supersedes the earlier "no emulator on this host" statement.
 
 ## Slices
 | Slice | Description | Entry points | Primary agents |
