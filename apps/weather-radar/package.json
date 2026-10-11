@@ -26,7 +26,8 @@
   },
   "scripts": {
     "start": "expo start",
-    "android": "expo start --android",
+    "android": "node scripts/start-android.mjs",
+    "android:raw": "expo start --android",
     "ios": "expo start --ios",
     "web": "node -e \"console.error('This app targets iOS and Android: use npm start, npm run ios or npm run android. To render it in a browser, see https://ng-native.com/packages/web#beside-a-native-app'); process.exit(1)\"",
     "typecheck": "node metro.config.js && ngc -p tsconfig.json --noEmit",

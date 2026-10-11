@@ -35,6 +35,9 @@ Canonical app commands (all run from `apps/weather-radar/`):
 - `npm test` — vitest (hermetic, Node, no emulator needed)
 - `npm run typecheck` — Angular AOT typecheck (`node metro.config.js && ngc --noEmit`)
 - `npm start` / `npm run android` — Metro / Android via Expo Go or emulator
+  (`android` = freeze-proof launcher `scripts/start-android.mjs`; see
+  "Android launch path (2026-10-10)" below. `npm run android:raw` keeps the
+  legacy `expo start --android` behavior)
 - `npx expo export --platform android` — produce the Android Hermes bundle
   (a build/CI proof that needs no physical device)
 
@@ -78,7 +81,7 @@ pixel
 $ adb devices
 emulator-5554   device            # Android 16 / API 36
 # Boot completed in 32162 ms
-$ cd apps/weather-radar && npm run android      # expo start --android
+$ cd apps/weather-radar && npm run android      # freeze-proof launcher (waits for Metro)
 Metro bundler started; Android Bundled 8890ms src/main.ts (1261 modules)
 Expo Go (host.exp.exponent) installed on the emulator automatically
 # In-app UI, read back via `adb shell uiautomator dump`:
@@ -94,6 +97,36 @@ does host the ng-native custom native modules, so `expo run:android`
 (a local Gradle dev build) is **not** required — note that it would also
 have been blocked by OpenJDK 27, which is ahead of the AGP supported
 range and cannot be changed without sudo.
+
+### Android launch path (2026-10-10) — freeze root-caused and fixed
+
+On 2026-10-10 the app was reported as **frozen / blank on the emulator**
+("no muestra nada"). Root cause was **not** the app code and **not**
+ng-native 0.9.0:
+
+- **Expo Go launch race.** `expo start --android` opens the `exp://…`
+  URL on the device **before Metro is serving** (observed: the CLI logs
+  `› Opening exp://192.168.0.205:8081` immediately followed by
+  `Waiting on http://localhost:8081`). Expo Go's native `expo-updates`
+  then hangs **forever** on "Checking for new update…"; it does not
+  recover even after Metro reports `packager-status:running`
+  (reproduced: stuck >4 min with the spinner and an empty view tree,
+  then the human dismissed the app after ~100 s). No ANR, no fatal
+  crash, no Fabric/ng-native error anywhere in `logcat`.
+- **App exonerated.** With Metro warm and the experience force-stopped,
+  the same app **paints fully in ~12–30 s** on the SwiftShader emulator
+  (`adb shell uiautomator dump` shows the whole UI) and the live GET to
+  `https://radar.wo-cloud.com/config/config.json` returns **HTTP 200** —
+  verified on-device twice.
+- **Fix.** `npm run android` now runs `scripts/start-android.mjs`: it
+  starts Metro, **waits** for `packager-status:running`, force-stops any
+  hung Expo Go/`expo-updates` state, warms the Android bundle, then opens
+  `exp://<auto-detected-LAN-IP>:8081` via `am start`. It is idempotent —
+  re-running it is the recovery path. `npm run android:raw` preserves the
+  legacy `expo start --android` flow for reference.
+- **Framework verdict.** ng-native 0.9.0 alpha is **not** implicated;
+  no fallback-stack change was made (rebuild-from-scratch was judged
+  unnecessary: the app renders correctly once the launch race is gone).
 
 Notes:
 
@@ -135,6 +168,13 @@ Full inventory, each justified: `apps/weather-radar/ENDPOINTS.md`.
 - 2026-10-10: **Android toolchain installed locally (no sudo)** and the
   app **booted on an emulator** — see "Android toolchain on this host"
   above. Supersedes the earlier "no emulator on this host" statement.
+- 2026-10-10: **blank-screen freeze root-caused** to the Expo Go
+  launch race (`expo start --android` opening the experience before
+  Metro is serving → `expo-updates` hangs on "Checking for new
+  update…"); ng-native 0.9.0 exonerated by direct on-device evidence.
+  `npm run android` now runs the freeze-proof launcher
+  (`scripts/start-android.mjs`, waits for Metro → force-stop → bundle
+  warm → open); see "Android launch path (2026-10-10)" above.
 
 ## Slices
 | Slice | Description | Entry points | Primary agents |
@@ -153,5 +193,6 @@ Full inventory, each justified: `apps/weather-radar/ENDPOINTS.md`.
   Google/Angular/Expo; the demo is experimental. The app transitively
   carries 30 npm-audit findings from the bleeding-edge template — acceptable
   for a local read-only demo; revisit (`npm audit`) before wider use. The
-  scaffold also ships template `AGENTS.md` / `CLAUDE.md` / `.claude/` as
-  developer guidance.
+  scaffold originally shipped template `AGENTS.md` / `CLAUDE.md` / `.claude/`
+  as developer guidance; they were **removed by the human** to keep the
+  package clean.
