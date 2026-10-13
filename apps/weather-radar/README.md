@@ -13,9 +13,11 @@ npm run typecheck
 
 `npm run android` runs `scripts/start-android.mjs`, which waits for Metro to report ready
 and warms the Android bundle before it opens the experience, so it is safe to re-run. The
-legacy `npm run android:raw` (`expo start --android`) opens the app before Metro is serving,
-which can hang Expo Go forever on "Checking for new update...". Use the launcher by default,
-and `android:raw` only for the legacy flow.
+launcher also verifies the experience really opened — `dumpsys` must show Expo Go's focused
+`ExperienceActivity` — and retries the open when Expo Go's cold start swallows the `exp://`
+intent. The legacy `npm run android:raw` (`expo start --android`) opens the app before Metro
+is serving, which can hang Expo Go forever on "Checking for new update...". Use the launcher
+by default, and `android:raw` only for the legacy flow.
 
 `src/app/app.ts` is the root component and `src/main.ts` mounts it. Expo Go is enough for development; a
 release build or a native module Expo Go does not include needs a development build

@@ -128,6 +128,40 @@ ng-native 0.9.0:
   no fallback-stack change was made (rebuild-from-scratch was judged
   unnecessary: the app renders correctly once the launch race is gone).
 
+#### 2026-10-13 update — cold-start intent race (second blank-screen class)
+
+A **second, distinct** blank-screen class — `npm run android` leaves the app
+open but blank, intermittently — was root-caused on 2026-10-13 (AVD `pixel`,
+API 36).
+
+- **Root cause.** An **Expo Go cold-start intent race**, not the app code, not
+  ng-native, not the staged UI work. After the launcher force-stops Expo Go and
+  re-opens `exp://…`, the intent can dead-land: Expo Go's JS intent-router is
+  not up yet (`Could not find listener for key: openExperienceActivity` /
+  `...loadBundleForExperienceActivity`), the `ExperienceActivity` never
+  displays, and the process freezes in the background with **zero TCP
+  connections** to Metro. `am start` **exits 0** regardless — its exit code
+  proves nothing. The success path logs `Displayed
+  host.exp.exponent/.experience.ExperienceActivity for user 0: +460ms`; the
+  dead-land path never logs a `Displayed` line.
+- **Fix** (`scripts/start-android.mjs`, +117/−17). `resolveDevice` waits for
+  `sys.boot_completed=1` (2 s poll, 120 s cap, fatal + actionable message);
+  `forceStopExpoGo` waits (best-effort, 5 s) for the `host.exp.exponent` PID to
+  disappear; `openExperience` **verifies** the open — the focused/resumed
+  activity line of `adb shell dumpsys activity activities` must name both
+  `host.exp.exponent` and `ExperienceActivity` (task-history lines do NOT
+  count) — and retries `am start` up to 3 attempts (20 s verify window, 2 s
+  between). Exhausted retries are **non-fatal**: Metro stays up and the message
+  tells the user to re-run (the launcher stays idempotent).
+- **Verification.** On-device **5/5 launches painted** (2 fresh + 3 immediate
+  re-runs; each re-run dead-landed on attempt 1 and **self-healed on attempt
+  2**). `npm test` 24/24, `npm run typecheck` clean, `npx expo export
+  --platform android` bundles (1287 modules). The staged `src/app/*` UI work is
+  **exonerated**: with it in place the app paints the full UI (`uiautomator
+  dump`: wordmark "Weather Radar", Legend/Radar layers/Webcams, timeline
+  now/today/tomorrow/+3 d/+4 d/−24 h, "50 km" scale, "Simulated data ·
+  read-only demo" line).
+
 Notes:
 
 - The new `sdkmanager` (cmdline-tools ≥ 23) is a thin wrapper over the
@@ -138,6 +172,10 @@ Notes:
 - `/usr/bin/adb` (android-tools, 37.0.0) remains installed system-wide;
   the SDK's `platform-tools` (37.0.1) wins on `PATH` once
   `~/.bashrc` is sourced.
+- Cosmetic, **non-blocking** dev-startup warning `NG0318 [style.transform]`
+  (from `webcam-sheet.component.ts`'s React-Native-style transform array, as of
+  2026-10-13) — logged at dev startup only; a follow-up for the app author, it
+  does not affect rendering of the rest of the UI.
 
 ### Read-only network contract (app)
 The app is **read-only by construction**: HTTP **GET** only; no request
@@ -175,6 +213,12 @@ Full inventory, each justified: `apps/weather-radar/ENDPOINTS.md`.
   `npm run android` now runs the freeze-proof launcher
   (`scripts/start-android.mjs`, waits for Metro → force-stop → bundle
   warm → open); see "Android launch path (2026-10-10)" above.
+- 2026-10-13: **second blank-screen class root-caused** — an Expo Go
+  cold-start intent race in which `am start` exits 0 yet the experience never
+  displays — and fixed in `scripts/start-android.mjs` with verify-open +
+  bounded retry plus boot-completed and process-death waits. On-device 5/5
+  launches painted (3/3 re-runs self-healed); see the "2026-10-13 update"
+  sub-block above.
 
 ## Slices
 | Slice | Description | Entry points | Primary agents |

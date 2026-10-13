@@ -6,7 +6,9 @@
 // hangs forever on "Checking for new update...". This script starts Metro,
 // waits until it is actually ready, warms the Android bundle, resolves the
 // device + LAN IP, and only then opens the experience. It is idempotent:
-// re-running it is the recovery path.
+// re-running it is the recovery path. It also verifies the experience actually
+// opened (via `adb shell dumpsys`) and retries the open, bounded, because Expo
+// Go's cold start can swallow the exp:// intent even though `am start` exits 0.
 //
 // Self-test hook: set WEATHER_RADAR_WAIT_ONLY=1 to stop right after Metro is
 // ready and skip every device step (used to smoke-test the Metro-wait logic
@@ -29,6 +31,14 @@ const METRO_PROBE_POLL_MS = 300;
 const BUNDLE_TIMEOUT_MS = 300_000;
 const BUNDLE_ATTEMPTS = 3; // initial attempt + up to 2 retries
 const ADB_TIMEOUT_MS = 15_000;
+const BOOT_TIMEOUT_MS = 120_000;
+const BOOT_POLL_MS = 2_000;
+const PROCESS_EXIT_TIMEOUT_MS = 5_000;
+const PROCESS_POLL_MS = 500;
+const OPEN_VERIFY_TIMEOUT_MS = 20_000;
+const OPEN_VERIFY_POLL_MS = 1_000;
+const OPEN_ATTEMPTS = 3;
+const OPEN_RETRY_DELAY_MS = 2_000;
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -214,7 +224,30 @@ async function resolveDevice() {
   }
   for (const line of stdout.split('\n')) {
     const match = line.trim().match(/^(\S+)\s+device$/);
-    if (match) return match[1];
+    if (match) {
+      const serial = match[1];
+      // `adb devices` lists a device as soon as adb connects — long before the
+      // system is usable. sys.boot_completed=1 is the only reliable signal.
+      const deadline = Date.now() + BOOT_TIMEOUT_MS;
+      while (Date.now() < deadline) {
+        const { code: propCode, stdout: prop } = await run('adb', [
+          '-s',
+          serial,
+          'shell',
+          'getprop',
+          'sys.boot_completed',
+        ]);
+        if (propCode === 0 && prop.trim() === '1') {
+          log(`${serial} is fully booted.`);
+          return serial;
+        }
+        await delay(BOOT_POLL_MS);
+      }
+      fatal(
+        `${serial} is connected but did not report sys.boot_completed=1 within ` +
+          `${BOOT_TIMEOUT_MS / 1000}s. The emulator is still booting — wait and re-run \`npm run android\`.`,
+      );
+    }
   }
   fatal(
     'no Android device connected. Start your emulator (AVD `pixel`) or plug in a device, then re-run. ' +
@@ -250,6 +283,20 @@ async function forceStopExpoGo(serial) {
   } else {
     log('Could not force-stop Expo Go (continuing).');
   }
+
+  // `am force-stop` returns before the process is actually gone; opening the
+  // exp:// URL while the old process is still dying reproduces the cold-start
+  // intent race. Best effort: verify the PID disappeared, but never fail here.
+  const deadline = Date.now() + PROCESS_EXIT_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const { stdout: pid } = await run('adb', ['-s', serial, 'shell', 'pidof', 'host.exp.exponent']);
+    if (pid.trim() === '') {
+      log('Expo Go process has exited.');
+      return;
+    }
+    await delay(PROCESS_POLL_MS);
+  }
+  log('Expo Go process is still running after force-stop (continuing).');
 }
 
 // Step 7 — warm the Android bundle so Expo Go gets a fast first response.
@@ -296,23 +343,76 @@ function detectLanIp() {
   return ip;
 }
 
-// Step 9 — open the experience in Expo Go.
-async function openExperience(serial, url) {
-  const { code, stderr } = await run('adb', [
-    '-s',
-    serial,
-    'shell',
-    'am',
-    'start',
-    '-a',
-    'android.intent.action.VIEW',
-    '-d',
-    url,
-  ]);
-  if (code !== 0) {
-    fatal(`failed to open ${url} on ${serial}: ${stderr.trim() || `exit ${code}`}`);
+function isExperienceOpen(dumpsys) {
+  // Only the focused/resumed activity counts as proof: a task record names
+  // ExperienceActivity in its history long before it displays, so matching
+  // any line reports "open" while the intent dead-lands at the home screen.
+  return dumpsys
+    .split('\n')
+    .filter((line) => line.includes('mFocusedApp') || line.includes('mResumedActivity'))
+    .some((line) => line.includes('host.exp.exponent') && line.includes('ExperienceActivity'));
+}
+
+// Poll dumpsys until the experience is open. `am start` exits 0 even when Expo
+// Go's cold start swallows the exp:// intent (the intent dead-lands and the
+// process freezes in the background), so the exit code alone proves nothing —
+// and neither do the task-history lines, which name ExperienceActivity before
+// it is ever displayed. Only the focused/resumed activity counts.
+async function waitForExperienceOpen(serial) {
+  const deadline = Date.now() + OPEN_VERIFY_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const { stdout } = await run('adb', [
+      '-s',
+      serial,
+      'shell',
+      'dumpsys',
+      'activity',
+      'activities',
+    ]);
+    if (isExperienceOpen(stdout)) return true;
+    await delay(OPEN_VERIFY_POLL_MS);
   }
-  log(`Opening ${url} on ${serial}`);
+  return false;
+}
+
+// Step 9 — open the experience in Expo Go, then verify it really opened.
+async function openExperience(serial, url) {
+  for (let attempt = 1; attempt <= OPEN_ATTEMPTS; attempt++) {
+    const { code, stderr } = await run('adb', [
+      '-s',
+      serial,
+      'shell',
+      'am',
+      'start',
+      '-a',
+      'android.intent.action.VIEW',
+      '-d',
+      url,
+    ]);
+    if (code !== 0) {
+      fatal(`failed to open ${url} on ${serial}: ${stderr.trim() || `exit ${code}`}`);
+    }
+    log(`Opening ${url} on ${serial} (attempt ${attempt}/${OPEN_ATTEMPTS})`);
+
+    if (await waitForExperienceOpen(serial)) {
+      log(`Experience opened (${serial}).`);
+      return;
+    }
+
+    if (attempt < OPEN_ATTEMPTS) {
+      logErr(
+        `experience did not open on ${serial} (attempt ${attempt}/${OPEN_ATTEMPTS}); ` +
+          `retrying in ${OPEN_RETRY_DELAY_MS / 1000}s.`,
+      );
+      await delay(OPEN_RETRY_DELAY_MS);
+    }
+  }
+
+  // Not fatal: Metro must stay alive so the user can just re-run the launcher.
+  logErr(
+    `Expo Go did not open the experience on ${serial} after ${OPEN_ATTEMPTS} attempts. ` +
+      'Re-run `npm run android` (the launcher is idempotent) and check the Metro logs above.',
+  );
 }
 
 // ---------------------------------------------------------------------------
